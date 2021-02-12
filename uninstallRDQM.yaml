@@ -1,0 +1,43 @@
+---
+- name: Uninstalling MQ
+  hosts: "{{ varHosts }}" 
+  tasks: 
+    - name: Uninstall MQSeriesRuntime (1 of 5)
+      yum:
+        name: MQSeriesRuntime.x86_64
+        state: absent
+    - name: Uninstall MQSeriesServer (2 0f 5)
+      yum:
+        name: MQSeriesServer.x86_64
+        state: absent
+    - name: Uninstalling MQSeriesSamples (3 of 5)
+      yum:
+        name: MQSeriesSamples.x86_64
+        state: absent
+    - name: Uninstalling MQSeriesClient (4 of 5)
+      yum:
+        name: MQSeriesClient.x86_64
+        state: absent
+    - name: Uninstalling MQSeriesRDQM (5 of 5)
+      yum:
+        name: MQSeriesRDQM.x86_64
+        state: absent
+    - name: Removing mqm user from mqm group
+      user:
+        name: mqm
+        state: absent
+        remove: yes
+    - name: Removing mqm group
+      lineinfile:
+        path: /etc/group
+        state: absent
+        regexp: '^mqm'
+    - name: Removing haclient group
+      lineinfile:
+        path: /etc/group
+        state: absent
+        regexp: '^haclient'
+    - name: Removing /tmp/mq
+      file:
+        path: /tmp/mq
+        state: absent

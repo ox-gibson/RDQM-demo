@@ -1,0 +1,211 @@
+---
+- name: Install packages
+  hosts: "{{ varHosts }}" 
+  tasks:
+    - name: required packages are present
+      yum:
+        name:
+          - bash 
+          - bc
+          - ca-certificates
+          - coreutils
+          - curl
+          - file
+          - findutils
+          - gawk
+          - glibc-common
+          - grep
+          - passwd
+          - procps-ng
+          - sed
+          - tar
+          - vim
+          - psmisc
+          - util-linux
+        state: present
+    - name: add mqm group
+      group:
+        name: mqm
+        system: yes
+        state: present
+    - name: add haclient group
+      group:
+        name: haclient
+        system: yes
+        state: present
+    - name: Create mqm user
+      user:
+        name: mqm
+        uid: 8000
+        create_home: yes
+        home: /home/mqm
+        password: "{{ 'password' | password_hash('sha512', 'mysecretsalt') }}"
+        generate_ssh_key: yes
+        ssh_key_file: /home/mqm/.ssh/id_rsa
+        groups: mqm,haclient,wheel
+        state: present
+    - name: Add root user to mqm
+      user:
+        name: root
+        groups: mqm
+    - name: Set Authorizeed key from file
+      authorized_key:
+        user: mqm
+        state: present
+        key: "{{ lookup('file', '/home/mqm/.ssh/id_rsa.pub') }}"
+      become: true
+      become_user: mqm
+    - name: Set SELinux to permissive
+      shell: 'semanage permissive -a drbd_t'
+    - name: Verify SELinux 
+      shell: 'semanage permissive --l'
+#- name: Installing MQ
+#  hosts: localhost 
+#  tasks: 
+    - name: Create /tmp/mq
+      file:
+        path: /tmp/mq
+        state: directory
+    - name: Download and extracting MQ binaries to /tmp/mq
+      unarchive:
+        src: https://public.dhe.ibm.com/ibmdl/export/pub/software/websphere/messaging/mqadv/mqadv_dev913_linux_x86-64.tar.gz 
+        dest: /tmp/mq/
+        remote_src: yes
+    - name: Accept License
+      shell: '/tmp/mq/MQServer/mqlicense.sh -text_only -accept'
+    - name: Install MQ
+      command: "/tmp/mq/MQServer/Advanced/RDQM/installRDQMsupport"
+    - name: Update yum
+      yum:
+        name: yum
+        state: latest
+    - name: Set the default MQ path
+      command: "/opt/mqm/bin/setmqinst -i -p /opt/mqm/"
+    - name: Call Display MQ Version
+      command: "dspmqver"
+      register: VER
+    - debug: 
+        var: VER.stdout_lines
+#- name: Configure RDQM
+#  hosts: "{{ varHosts }}" 
+#  tasks:
+    - name: Check VG status
+      shell: vgs | grep drbdpool
+      register: vgs_grep
+      ignore_errors: True
+    - debug:
+       var: vgs_grep.stdout_lines
+    - name: Create pv
+      command: "pvcreate /dev/sdb"
+      when: vgs_grep is failed
+    - name: Create vg
+      command: "vgcreate drbdpool /dev/sdb"
+      when: vgs_grep is failed
+    - name: Verify vgs
+      command: "vgs"
+      register: VERIFY
+    - debug:
+        var: VERIFY.stdout_lines
+    - name: Verify host1
+      shell: grep "^10.0.12.191" /etc/hosts
+      register: server1
+      ignore_errors: True
+    - name: Verify host2
+      shell: grep "^10.0.12.192" /etc/hosts
+      register: server2
+      ignore_errors: True
+    - name: Verify host3
+      shell: grep "^10.0.12.193" /etc/hosts
+      register: server3
+      ignore_errors: True
+    - name: Add rdqm01 to /etc/hosts file 
+      lineinfile:
+        dest: /etc/hosts
+        line: "10.0.12.191 rdqm01" 
+      when: server1 is failed
+    - name: Add rdqm02 to /etc/hosts file 
+      lineinfile:
+        dest: /etc/hosts
+        line: "10.0.12.192 rdqm02" 
+      when: server2 is failed
+    - name: Add rdqm03 to /etc/hosts file 
+      lineinfile:
+        dest: /etc/hosts
+        line: "10.0.12.193 rdqm03" 
+      when: server3 is failed
+    - name: Ensure Firewalld is running
+      command: "systemctl start firewalld"
+    - name: Configure Firewalld
+      script: /opt/mqm/samp/rdqm/firewalld/configure.sh
+    - name: Create rdqm.ini file with IP addresses
+      copy:
+        dest: /var/mqm/rdqm.ini
+        content: |
+          Node:
+             HA_Replication=10.0.12.191
+           Node:
+             HA_Replication=10.0.12.192
+           Node:
+             HA_Replication=10.0.12.193
+    - name: Enable execution permisions rdqmadm
+      file:
+        path: /opt/mqm/bin/rdqmadm
+        owner: mqm 
+        group: mqm
+        mode: '0755'
+    - name: Enable execution permisions rdqmstatus
+      file:
+        path: /opt/mqm/bin/rdqmstatus
+        owner: mqm 
+        group: mqm
+        mode: '0755'
+
+- name: Configure HA Cluster
+  hosts: localhost
+  tasks:
+    - name: Run HA Cluster command
+      shell: '/opt/mqm/bin/rdqmadm -c'
+    - name: Test for setmqenv in mqm bash_profile
+      shell: grep "^. /opt/mqm/bin/setmqenv -s" /home/mqm/,bash_profile
+      register: set_mqenv
+    - name: Add setmqenv to mqm bash_profile is not there
+      lineinfile:
+        dest: /home/mqm/.bash_profile
+        line: ". /opt/mqm/bin/setmqenv -s"
+      when: set_mqenv.stdout != ""
+    - name: Create QM
+      shell: 'crtmqm -sx QM01'
+      become: true
+      become_user: mqm
+
+- name: Verify Queue Managers
+  hosts: "{{ varHosts }}"
+  tasks:
+    - name: Verify QM's
+      shell: 'rdqmstatus -m QM01'
+      become: true
+      become_user: mqm
+
+- name: Perform Fail Over Tests
+  hosts: localhost
+  tasks:
+    - name: Suspend node from RDQM HA
+      shell: "rdqmadm -s"
+
+- name: Verify Fail Over Tests on all Nodes
+  hosts: "{{ varHosts }}"
+  tasks:
+    - name: Verify fail over
+      shell: "rdqmstatus -n"
+
+- name: Restore queues
+  hosts: localhost
+  tasks:
+    - name: Resume node on RDQM HA
+      shell: "rdqmadm -r"
+
+- name: Verify Queues on all Nodes
+  hosts: "{{ varHosts }}"
+  tasks:
+    - name: Verify Queues
+      shell: "rdqmstatus -n"
